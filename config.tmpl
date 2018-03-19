@@ -1,2 +1,2 @@
-{{range $i, $r := .routes}}ip route replace {{$r.Destination}} via {{$r.Nexthop}}
+{{range $i, $r := .routes}}ip route replace {{$r.Destination}} via {{$r.Nexthop}} table kubernetes #{{$r.Label}}
 {{end}}
