@@ -57,12 +57,22 @@ func getRoutes(client *k8s.Client) (routes []Route, err error) {
 
 	for _, n := range nodes.Items {
 
+		if *n.Spec.PodCIDR == "" {
+			log.Debugf("Node : %v have not podCidr, skipping it", *n.Metadata.Name)
+			continue
+		}
+
 		log.Debugf("Node : %v, podCidr : %v", *n.Metadata.Name, *n.Spec.PodCIDR)
 		for _, a := range n.Status.Addresses {
 
 			log.Debugf(" - Address : %v %v", *a.Address, *a.Type)
 
 			if *a.Type == "InternalIP" {
+
+				if *a.Address == "" {
+					log.Debugf("Node : %v have not internalIP, skipping it", *n.Metadata.Name)
+					continue
+				}
 
 				nRoute := Route{
 					Destination: *n.Spec.PodCIDR,
@@ -71,6 +81,7 @@ func getRoutes(client *k8s.Client) (routes []Route, err error) {
 				}
 				routes = append(routes, nRoute)
 				log.Debugf("Route OK : %+v", nRoute)
+
 			}
 		}
 	}
