@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/ericchiang/k8s"
+	corev1 "github.com/ericchiang/k8s/apis/core/v1"
 	"github.com/ghodss/yaml"
 	"github.com/namsral/flag"
 	"github.com/sirupsen/logrus"
@@ -50,8 +51,8 @@ func loadClient(kubeconfigPath string) (*k8s.Client, error) {
 
 func getRoutes(client *k8s.Client) (routes []Route, err error) {
 
-	nodes, err := client.CoreV1().ListNodes(context.Background())
-	if err != nil {
+	var nodes corev1.NodeList
+	if err := client.List(context.Background(), "", &nodes); err != nil {
 		return nil, fmt.Errorf("Cannot list nodes: %v", err)
 	}
 
