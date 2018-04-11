@@ -8,21 +8,22 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/namsral/flag"
 	"github.com/sirupsen/logrus"
+	"github.com/vishvananda/netlink"
 	"io/ioutil"
+	"net"
 	"os"
-	"os/exec"
-	"reflect"
-	"text/template"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"reflect"
+	"runtime"
 )
 
 type Config struct {
-	kubeConfig   string
-	tmplFile     string
-	configFile   string
-	reloadScript string
-	syncPeriod   int
-	debug        bool
+	kubeConfig string
+	syncPeriod int
+	debug      bool
 }
 
 type Route struct {
@@ -31,8 +32,29 @@ type Route struct {
 	Label       string
 }
 
+type RouteAction func(route *netlink.Route) error
+
+func (ra RouteAction) Name() string {
+	return runtime.FuncForPC(reflect.ValueOf(ra).Pointer()).Name()
+}
+
+var currentRoutes []Route
 var config Config
 var log = logrus.New()
+
+func setupCloseHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		for sig := range c {
+			log.Infof("\r\nCaptured %v, gracefully cleaning routing table...", sig)
+			configureRoutes(currentRoutes, netlink.RouteDel)
+			log.Infof("All cleaned: Goodbye.")
+			os.Exit(1)
+		}
+	}()
+}
 
 func loadClient(kubeconfigPath string) (*k8s.Client, error) {
 
@@ -90,42 +112,22 @@ func getRoutes(client *k8s.Client) (routes []Route, err error) {
 	return routes, nil
 }
 
-func configureRoutes(routes []Route, tmplFile string, configFile string) {
+func configureRoutes(routes []Route, ra RouteAction) {
 
 	for n, route := range routes {
-		log.Infof("Route #%v, %v %v %v", n, route.Label, route.Destination, route.Nexthop)
-	}
+		log.Infof(" - Route #%v, %v %v %v", n, route.Label, route.Destination, route.Nexthop)
 
-	t, err := template.ParseFiles(tmplFile)
-	if err != nil {
-		log.Errorf("Failed to load template file: %v", err)
-		return
-	}
+		_, dst, err := net.ParseCIDR(route.Destination)
+		if err != nil {
+			log.Errorf("    Error parsing route destination : %v", err)
+		}
 
-	w, err := os.Create(configFile)
-	if err != nil {
-		log.Errorf("Failed to open config file: %v", err)
-		return
-	}
+		ip := net.ParseIP(route.Nexthop)
 
-	conf := make(map[string]interface{})
-	conf["routes"] = routes
+		if err := ra(&netlink.Route{Dst: dst, Gw: ip}); err != nil {
+			log.Errorf("    Error in %v : %v", ra.Name(), err)
+		}
 
-	err = t.Execute(w, conf)
-	if err != nil {
-		log.Errorf("Failed to write config file: %v", err)
-		return
-	} else {
-		log.Infof("Write config file: %v", configFile)
-	}
-
-	log.Infof("Ready to reload routes")
-
-	out, err := exec.Command(config.reloadScript).CombinedOutput()
-	if err != nil {
-		log.Errorf("Error reloading routes: %v\n%s", err, out)
-	} else {
-		log.Infof("Reload script succeed:\n%s", out)
 	}
 
 	return
@@ -134,14 +136,14 @@ func configureRoutes(routes []Route, tmplFile string, configFile string) {
 func init() {
 
 	flag.StringVar(&config.kubeConfig, "kubeConfig", os.Getenv("HOME")+"/.kube/config", "kubeconfig file to load")
-	flag.StringVar(&config.tmplFile, "tmplFile", "config.tmpl", "Template file to load")
-	flag.StringVar(&config.configFile, "configFile", "config.conf", "Configuration file to write")
-	flag.StringVar(&config.reloadScript, "reloadScript", "./reload.sh", "Reload script to launch")
 	flag.IntVar(&config.syncPeriod, "syncPeriod", 600, "Period between update")
 	flag.BoolVar(&config.debug, "debug", false, "Enable debug messages")
 
-	log.Formatter = new(logrus.TextFormatter)
+	log.Formatter = &logrus.TextFormatter{
+		FullTimestamp: true,
+	}
 	log.Level = logrus.InfoLevel
+
 }
 
 func main() {
@@ -156,25 +158,17 @@ func main() {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
-	log.Infof("Initial GetRoutes fired")
-	currentRoutes, err := getRoutes(client)
-	if err != nil {
-		log.Fatalf("Failed initial GetRoutes: %v", err)
-	}
-	configureRoutes(currentRoutes, config.tmplFile, config.configFile)
+	setupCloseHandler()
 
-	for t := range time.NewTicker(time.Duration(config.syncPeriod) * time.Second).C {
-
-		log.Debugf("GetRoutes fired at %+v", t)
-		newRoutes, err := getRoutes(client)
+	// Such idiom permits immediate first tick
+	for t := time.Tick(time.Duration(config.syncPeriod) * time.Second); ; <-t {
+		log.Infof("New Tick fired")
+		currentRoutes, err = getRoutes(client)
 		if err != nil {
 			log.Errorf("Failed GetRoutes: %v", err)
+			continue
 		}
-
-		if !reflect.DeepEqual(newRoutes, currentRoutes) {
-			log.Infof("Routes have changed, script fired")
-			currentRoutes = newRoutes
-			configureRoutes(currentRoutes, config.tmplFile, config.configFile)
-		}
+		configureRoutes(currentRoutes, netlink.RouteReplace)
 	}
+
 }
